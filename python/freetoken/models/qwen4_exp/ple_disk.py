@@ -18,7 +18,7 @@ from freetoken.core import Batch
 from freetoken.kernel.pinned import alloc_pinned_tensor
 from freetoken.utils import init_logger
 
-from .weight import check_ple_geometry, ple_table_layout
+from .weight import PleShardIdentity, check_ple_geometry, ple_table_layout, revalidate_ple_shard
 
 _IO_URING_ENV = "FREETOKEN_PLE_IO_URING"
 _SYNC_ENV = "FREETOKEN_PLE_SYNC"  # auto | wait | gate
@@ -43,6 +43,7 @@ class PleRowSource:
     row_bytes: int
     row_stride: int
     scale: float
+    files: tuple[PleShardIdentity, ...] = ()  # what preflight saw of each file, re-checked before the store opens them
 
     @property
     def total_rows(self) -> int:
@@ -64,7 +65,7 @@ def source_from_safetensors(folder: str, qwen4_args=None) -> PleRowSource:
             paths.append(part.path)
     return PleRowSource(
         paths, [path_idx[p.path] for p in layout.parts], [p.file_offset for p in layout.parts],
-        layout.rows_per_part, layout.cols, layout.cols, float(layout.scale),
+        layout.rows_per_part, layout.cols, layout.cols, float(layout.scale), layout.files,
     )
 
 
@@ -85,6 +86,8 @@ class DiskRowTable:
         max_extend_tokens: int = 8192,
         dtype: torch.dtype = torch.bfloat16,
     ) -> None:
+        for shard in source.files:  # the files the store is about to pin descriptors to are the ones preflight parsed
+            revalidate_ple_shard(shard)
         from freetoken.kernel.row_store import PleStore
 
         self.num_rows = source.total_rows
